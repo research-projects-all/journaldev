@@ -2,8 +2,9 @@ name: SonarCloud
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: ["main", "master", "develop"]
   pull_request:
+    branches: ["main", "master", "develop"]
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -12,7 +13,7 @@ permissions:
 
 jobs:
   sonarcloud:
-    name: Build and analyze with SonarCloud
+    name: Analyze Java and Spring sources
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
@@ -26,27 +27,55 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
           cache: maven
 
-      - name: Compile all Maven projects
+      - name: Compile Maven projects that can be compiled
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
-          find . -name pom.xml -not -path '*/target/*' | sort | while read -r pom; do
-            echo "Compiling $(dirname "$pom")"
-            mvn -B -q -f "$pom" -DskipTests clean compile
-          done
+          : > compiled-projects.txt
+          : > failed-projects.txt
+
+          while IFS= read -r pom; do
+            project_dir="$(dirname "$pom")"
+            echo "Compiling ${project_dir}"
+
+            if mvn -B -f "$pom" -DskipTests -DskipITs clean compile; then
+              if [ -d "${project_dir}/target/classes" ]; then
+                echo "${project_dir}/target/classes" >> compiled-projects.txt
+              fi
+            else
+              echo "${project_dir}" >> failed-projects.txt
+            fi
+          done < <(find . -name pom.xml -not -path '*/target/*' | sort)
+
+          if [ ! -s compiled-projects.txt ]; then
+            echo "No Maven project produced target/classes. Sonar Java analysis needs compiled classes."
+            exit 1
+          fi
+
+          java_binaries="$(paste -sd, compiled-projects.txt)"
+
+          cat > sonar-project.properties <<EOF_PROPS
+          sonar.organization=research-projects-all
+          sonar.projectKey=research-projects-all_journaldev
+          sonar.projectName=journaldev
+          sonar.sources=.
+          sonar.java.binaries=${java_binaries}
+          sonar.exclusions=**/target/**,**/.mvn/**,**/mvnw,**/mvnw.cmd,**/gradlew,**/gradlew.bat,**/build/**,**/.gradle/**,**/LogoDesigns/**
+          EOF_PROPS
+
+          echo "Compiled projects:"
+          cat compiled-projects.txt
+
+          if [ -s failed-projects.txt ]; then
+            echo "Projects that did not compile. They will still be scanned as sources, but semantic Java rules may be limited for them:"
+            cat failed-projects.txt
+          fi
 
       - name: SonarCloud scan
         uses: SonarSource/sonarqube-scan-action@v8.1.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          args: >
-            -Dsonar.organization=research-projects-all
-            -Dsonar.projectKey=research-projects-all_journaldev
-            -Dsonar.sources=.
-            -Dsonar.java.binaries=**/target/classes
-            -Dsonar.exclusions=**/target/**,**/.mvn/**,**/mvnw,**/mvnw.cmd
